@@ -8,7 +8,7 @@
 
 extern struct lws_protocols protocols[];
 char cmdPrefix = '!';
-typedef struct { char* cmd; void (*function)(); } qdbCmd;
+typedef struct { char cmd[64]; void (*function)(const char* channelId); } qdbCmd;
 qdbCmd commands[MAX_COMMANDS];
 int logs = 0, commandCount = 0;
 char TOKEN[128];
@@ -41,13 +41,21 @@ void madeBot(char* token) {
 	lws_context_destroy(context);
 	curl_global_cleanup();
 }
-void sendMsg(const char *channel_id, const char *text) {
+void escape_newlines(const char *input, char *output, size_t max_len) {
+	size_t i = 0; size_t j = 0;
+	while (input[i] != '\0' && j < max_len - 1) { if (input[i] == '\n') { if (j + 2 < max_len) { output[j++] = '\\'; output[j++] = 'n'; } } else { output[j++] = input[i]; } i++; }
+	output[j] = '\0';
+}
+void sendMsg(const char *channelId, const char *text) {
 	CURL *curl = curl_easy_init();
 	if(curl) {
 		char url[256];
-		sprintf(url, "https://discord.com/api/v10/channels/%s/messages", channel_id);
-		char json_payload[512];
-		sprintf(json_payload, "{\"content\":\"%s\"}", text);
+		sprintf(url, "https://discord.com/api/v10/channels/%s/messages", channelId);
+		char escText[1024];
+		escape_newlines(text, escText, sizeof(escText));
+		char json_payload[1024];
+		sprintf(json_payload, "{\"content\":\"%s\"}", escText);
+
 		struct curl_slist *headers = NULL;
 		char auth_header[256];
 		snprintf(auth_header, sizeof(auth_header), "Authorization: Bot %s", TOKEN);
@@ -64,9 +72,9 @@ void sendMsg(const char *channel_id, const char *text) {
 	}
 }
 void setCmdPrefix(char prefix) { cmdPrefix = prefix; }
-void addCommand(char* command, void (*function)()) {
+void addCommand(char* command, void (*function)(const char* channelId)) {
 	if (commandCount >= MAX_COMMANDS) { printf(API_PREFIX"ERROR: Maximum number of commands exceeded!\n"); return; }
-	strcpy(commands[commandCount].cmd, command);
+	snprintf(commands[commandCount].cmd, sizeof(commands[commandCount].cmd), "%c%s", cmdPrefix, command);
 	commands[commandCount].function = function;
 	commandCount++;
 }
@@ -125,12 +133,12 @@ static int callback_discord(struct lws *wsi, enum lws_callback_reasons reason, v
 							if (len_cmd > 63) len_cmd = 63;
 							strncpy(cmd, c, len_cmd);
 							if (logs >= 1) printf(API_PREFIX"New message:\n    Channel: %s\n    User: %s\n    Data: '%s'\n", channel_id, username, cmd);
-							if (strcmp(cmd, "!help") == 0) {
-								if (logs >= 1) printf(API_PREFIX"Responding...\n");
-								sendMsg(channel_id, "Witaj! Jestem QBot.");
-							} else if (strcmp(cmd, "elo") == 0) {
-								if (logs >= 1) printf(API_PREFIX"Responding...\n");
-								sendMsg(channel_id, "Siema!");
+							for (int i = 0; i < commandCount; i++) {
+								if (!strcmp(cmd, commands[i].cmd)) {
+									commands[i].function(channel_id);
+									printf(API_PREFIX"Running command '%s'...\n", cmd);
+									break;
+								}
 							}
 						}
 					}
