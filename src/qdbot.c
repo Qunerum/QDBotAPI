@@ -2,10 +2,18 @@
 #include <string.h>
 #include <stdio.h>
 #include <curl/curl.h>
+#include "../include/qdbot.h"
+
+#define API_PREFIX "[QDBotAPI] "
 
 extern struct lws_protocols protocols[];
+char cmdPrefix = '!';
+typedef struct { char* cmd; void (*function)(); } qdbCmd;
+qdbCmd commands[MAX_COMMANDS];
+int logs = 0, commandCount = 0;
 char TOKEN[128];
-int logs = 0;
+size_t write_callback(char *ptr, size_t size, size_t nmemb, void *userdata) { (void)ptr; (void)userdata; return size * nmemb; }
+// = = = = = PUBLIC = = = = = = = = = = = = = = =
 void setLogs(int state) { logs = state; }
 void madeBot(char* token) {
 	strcpy(TOKEN, token);
@@ -33,7 +41,6 @@ void madeBot(char* token) {
 	lws_context_destroy(context);
 	curl_global_cleanup();
 }
-size_t write_callback(char *ptr, size_t size, size_t nmemb, void *userdata) { return size * nmemb; }
 void sendMsg(const char *channel_id, const char *text) {
 	CURL *curl = curl_easy_init();
 	if(curl) {
@@ -56,10 +63,18 @@ void sendMsg(const char *channel_id, const char *text) {
 		curl_easy_cleanup(curl);
 	}
 }
-void extract_json_value(const char *json, const char *key, char *output, size_t max_len) {
+void setCmdPrefix(char prefix) { cmdPrefix = prefix; }
+void addCommand(char* command, void (*function)()) {
+	if (commandCount >= MAX_COMMANDS) { printf(API_PREFIX"ERROR: Maximum number of commands exceeded!\n"); return; }
+	strcpy(commands[commandCount].cmd, command);
+	commands[commandCount].function = function;
+	commandCount++;
+}
+// = = = = = END PUBLIC = = = = = = = = = = = = = = =
+void extract_json_value(char *json, const char *key, char *output, size_t max_len) {
 	char search_key[128];
 	snprintf(search_key, sizeof(search_key), "\"%s\":\"", key);
-	char *c = strstr(json, search_key);
+	char* c = strstr(json, search_key);
 	if (!c) return;
 	c += strlen(search_key);
 	char *end = strchr(c, '\"');
@@ -73,9 +88,9 @@ static int callback_discord(struct lws *wsi, enum lws_callback_reasons reason, v
 	(void)user;
 	switch (reason) {
 		case LWS_CALLBACK_CLIENT_RECEIVE:
-			if (logs >= 2) printf("%.*s\n", (int)len, (char *)in);
+			if (logs >= 2) printf(API_PREFIX"%.*s\n", (int)len, (char *)in);
 			if (strstr((char *)in, "\"op\":10")) {
-				printf("Sending Identify...\n");
+				printf(API_PREFIX"Sending Identify...\n");
 				char payload[1024];
 				snprintf(payload, sizeof(payload), "{\"op\":2,\"d\":{\"token\":\"%s\",\"intents\":33281,\"properties\":{\"$os\":\"linux\",\"$browser\":\"my_bot\",\"$device\":\"my_bot\"}}}", TOKEN);
 				size_t p_len = strlen(payload);
@@ -84,9 +99,9 @@ static int callback_discord(struct lws *wsi, enum lws_callback_reasons reason, v
 				lws_write(wsi, buf + LWS_PRE, p_len, LWS_WRITE_TEXT);
 				free(buf);
 			}
-			if (strstr((char *)in, "\"t\":\"READY\"")) { printf("SUCCESS: Logged! (READY)!\n"); }
+			if (strstr((char *)in, "\"t\":\"READY\"")) { printf(API_PREFIX"Logged!\n"); }
 			if (strstr((char *)in, "\"op\":11")) {
-				printf("ACK Recieved. Sending Heartbeat...\n");
+				printf(API_PREFIX"ACK Recieved. Sending Heartbeat...\n");
 				const char *hb = "{\"op\":1,\"d\":null}";
 				size_t h_len = strlen(hb);
 				unsigned char *bufh = malloc(LWS_PRE + h_len);
@@ -109,12 +124,12 @@ static int callback_discord(struct lws *wsi, enum lws_callback_reasons reason, v
 							size_t len_cmd = (size_t)(end - c);
 							if (len_cmd > 63) len_cmd = 63;
 							strncpy(cmd, c, len_cmd);
-							if (logs >= 1) printf("New message:\n    Channel: %s\n    User: %s\n    Data: '%s'\n", channel_id, username, cmd);
+							if (logs >= 1) printf(API_PREFIX"New message:\n    Channel: %s\n    User: %s\n    Data: '%s'\n", channel_id, username, cmd);
 							if (strcmp(cmd, "!help") == 0) {
-								if (logs >= 1) printf("Responding...\n");
+								if (logs >= 1) printf(API_PREFIX"Responding...\n");
 								sendMsg(channel_id, "Witaj! Jestem QBot.");
 							} else if (strcmp(cmd, "elo") == 0) {
-								if (logs >= 1) printf("Responding...\n");
+								if (logs >= 1) printf(API_PREFIX"Responding...\n");
 								sendMsg(channel_id, "Siema!");
 							}
 						}
@@ -122,9 +137,9 @@ static int callback_discord(struct lws *wsi, enum lws_callback_reasons reason, v
 				}
 			}
 			break;
-			case LWS_CALLBACK_CLIENT_CONNECTION_ERROR: printf("Connection error!\n"); break;
+			case LWS_CALLBACK_CLIENT_CONNECTION_ERROR: printf(API_PREFIX"Connection error!\n"); break;
 			default: break;
 	}
 	return 0;
 }
-struct lws_protocols protocols[] = { { .name = "discord-bot", .callback = callback_discord, .per_session_data_size = 0, .rx_buffer_size = 65536, .id = 0 }, { NULL, NULL, 0, 0, 0 } };
+struct lws_protocols protocols[] = { { .name = "discord-bot", .callback = callback_discord, .per_session_data_size = 0, .rx_buffer_size = 65536 }, { 0 } };
