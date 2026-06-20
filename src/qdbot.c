@@ -7,16 +7,24 @@
 #define API_PREFIX "[QDBotAPI] "
 
 extern struct lws_protocols protocols[];
-char cmdPrefix = '!';
+static char cmdPrefix = '!';
 typedef struct { char cmd[64]; void (*function)(const char* channelId); } qdbCmd;
-qdbCmd commands[MAX_COMMANDS];
-int logs = 0, commandCount = 0;
-char TOKEN[128];
+static qdbCmd commands[MAX_COMMANDS];
+static int logs = 0, commandCount = 0;
+static char TOKEN[128];
 size_t write_callback(char *ptr, size_t size, size_t nmemb, void *userdata) { (void)ptr; (void)userdata; return size * nmemb; }
+void escape_newlines(const char *input, char *output, size_t max_len) {
+	size_t i = 0; size_t j = 0;
+	while (input[i] != '\0' && j < max_len - 1) { if (input[i] == '\n') { if (j + 2 < max_len) { output[j++] = '\\'; output[j++] = 'n'; } } else { output[j++] = input[i]; } i++; }
+	output[j] = '\0';
+}
+struct lws *global_wsi = NULL;
 // = = = = = PUBLIC = = = = = = = = = = = = = = =
 void setLogs(int state) { logs = state; }
-void madeBot(char* token) {
+static void (*initFn)() = NULL;
+void madeBot(char* token, void (*initFunc)()) {
 	strcpy(TOKEN, token);
+	initFn = initFunc;
 	curl_global_init(CURL_GLOBAL_ALL);
 	struct lws_context_creation_info info;
 	memset(&info, 0, sizeof(info));
@@ -41,10 +49,21 @@ void madeBot(char* token) {
 	lws_context_destroy(context);
 	curl_global_cleanup();
 }
-void escape_newlines(const char *input, char *output, size_t max_len) {
-	size_t i = 0; size_t j = 0;
-	while (input[i] != '\0' && j < max_len - 1) { if (input[i] == '\n') { if (j + 2 < max_len) { output[j++] = '\\'; output[j++] = 'n'; } } else { output[j++] = input[i]; } i++; }
-	output[j] = '\0';
+void setPresence(int status, const char *activity_name, int type) {
+	if (!global_wsi) return;
+	char presence_json[1024];
+	snprintf(presence_json, sizeof(presence_json),
+			 "{\"op\":3,\"d\":{"
+			 "\"since\":null,"
+			 "\"activities\":[{\"name\":\"%s\",\"type\":%d}],"
+			 "\"status\":\"%s\","
+			 "\"afk\":false"
+			 "}}", activity_name, type, status == 1 ? "idle" : status == 2 ? "dnd" : status == 3 ? "invisible" : "online");
+	size_t len = strlen(presence_json);
+	unsigned char *buf = malloc(LWS_PRE + len);
+	memcpy(buf + LWS_PRE, presence_json, len);
+	lws_write(global_wsi, buf + LWS_PRE, len, LWS_WRITE_TEXT);
+	free(buf);
 }
 void sendMsg(const char *channelId, const char *text) {
 	CURL *curl = curl_easy_init();
@@ -55,7 +74,6 @@ void sendMsg(const char *channelId, const char *text) {
 		escape_newlines(text, escText, sizeof(escText));
 		char json_payload[1024];
 		sprintf(json_payload, "{\"content\":\"%s\"}", escText);
-
 		struct curl_slist *headers = NULL;
 		char auth_header[256];
 		snprintf(auth_header, sizeof(auth_header), "Authorization: Bot %s", TOKEN);
@@ -66,6 +84,29 @@ void sendMsg(const char *channelId, const char *text) {
 		curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
 		curl_easy_setopt(curl, CURLOPT_WRITEDATA, NULL);
+		curl_easy_perform(curl);
+		curl_slist_free_all(headers);
+		curl_easy_cleanup(curl);
+	}
+}
+void sendEmbed(const char *channel_id, const char *title, const char *description, int r, int g, int b) {
+	CURL *curl = curl_easy_init();
+	if(curl) {
+		r = clamp(r, 0, 255); g = clamp(g, 0, 255); b = clamp(b, 0, 255);
+		char url[256];
+		sprintf(url, "https://discord.com/api/v10/channels/%s/messages", channel_id);
+		int clr = (r << 16) + (g << 8) + b;
+		char json_payload[1024];
+		snprintf(json_payload, sizeof(json_payload), "{\"embeds\":[{\"title\":\"%s\",\"description\":\"%s\",\"color\":%d}]}", title, description, clr);
+		struct curl_slist *headers = NULL;
+		char auth_header[256];
+		snprintf(auth_header, sizeof(auth_header), "Authorization: Bot %s", TOKEN);
+		headers = curl_slist_append(headers, auth_header);
+		headers = curl_slist_append(headers, "Content-Type: application/json");
+		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+		curl_easy_setopt(curl, CURLOPT_URL, url);
+		curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_payload);
+		curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 		curl_easy_perform(curl);
 		curl_slist_free_all(headers);
 		curl_easy_cleanup(curl);
@@ -95,11 +136,12 @@ void extract_json_value(char *json, const char *key, char *output, size_t max_le
 static int callback_discord(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len) {
 	(void)user;
 	switch (reason) {
+		case LWS_CALLBACK_CLIENT_ESTABLISHED: global_wsi = wsi; break;
 		case LWS_CALLBACK_CLIENT_RECEIVE:
 			if (logs >= 2) printf(API_PREFIX"%.*s\n", (int)len, (char *)in);
 			if (strstr((char *)in, "\"op\":10")) {
 				printf(API_PREFIX"Sending Identify...\n");
-				char payload[1024];
+				char payload[1536];
 				snprintf(payload, sizeof(payload), "{\"op\":2,\"d\":{\"token\":\"%s\",\"intents\":33281,\"properties\":{\"$os\":\"linux\",\"$browser\":\"my_bot\",\"$device\":\"my_bot\"}}}", TOKEN);
 				size_t p_len = strlen(payload);
 				unsigned char *buf = malloc(LWS_PRE + p_len);
@@ -116,6 +158,7 @@ static int callback_discord(struct lws *wsi, enum lws_callback_reasons reason, v
 				memcpy(bufh + LWS_PRE, hb, h_len);
 				lws_write(wsi, bufh + LWS_PRE, h_len, LWS_WRITE_TEXT);
 				free(bufh);
+				if (initFn) initFn();
 			}
 			if (strstr((char *)in, "\"t\":\"MESSAGE_CREATE\"")) {
 				if (!strstr((char *)in, "\"bot\":true")) {
